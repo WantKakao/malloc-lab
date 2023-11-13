@@ -53,6 +53,7 @@ team_t team = {
 #define GET_ALLOC(p) (GET(p) & 0x1) // p 주소(헤더 or 푸터)에 저장된 할당여부의 값
 
 /* Given block ptr bp, compute address of its headr and footer */
+// char * 로 캐스팅하는 이유는 4바이트 단위를 빼주기위해서!!
 #define HDRP(bp) ((char *)(bp)-WSIZE)                        // bp 주소에 저장된 블록의 헤더
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE) // bp 주소에 저장된 블록의 푸터(헤더 정보 이용)
 
@@ -70,6 +71,7 @@ team_t team = {
 
 /* The only global variable is a pointer to the first block */
 char *heap_listp; // 힙 시작 블럭의 주소를 가리키는 포인터
+char *curr_listp; // 현재 힙 주소를 가리키는 포인터
 
 int mm_init(void);
 static void *extend_heap(size_t words);
@@ -80,6 +82,8 @@ void *mm_realloc(void *ptr, size_t size);
 void *first_fit(size_t asize);
 static void place(void *bp, size_t asize);
 void *next_fit(size_t asize);
+void *best_fit(size_t asize);
+void *worst_fit(size_t asize);
 
 /*
  * mm_init - initialize the malloc package.
@@ -87,6 +91,7 @@ void *next_fit(size_t asize);
 int mm_init(void)
 {
     /* Create the initial empty heap */
+    /* sbrk(n) 시 n byte 만큼 확장이 된다!! */
     if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *)-1) // mem_sbrk 성공시 heap_listp 에 힙의 시작 주소 저장 실패시 -1 return
         return -1;
     /* Put alignment padding, prologue header/footer, epilogue header */
@@ -94,7 +99,8 @@ int mm_init(void)
     PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1));
     PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1));
     PUT(heap_listp + (3 * WSIZE), PACK(0, 1));
-    heap_listp += (2 * WSIZE); // 프롤로그 블록의 푸터에 포인터 위치 (프롤로그 블럭의 payload 와 같음)
+    heap_listp += (2 * WSIZE); // 프롤로그 블록의 푸터에 포인터 위치 (프롤로그 블럭의 payload 와 같음), 불변
+    curr_listp = heap_listp;   // 현재 힙 주소를 시작 힙 주소로 초기화
 
     /* Extend the empty heap with a free block of CHUNKSIZE bytes */
     if (extend_heap(CHUNKSIZE / WSIZE) == NULL) // CHUNKSIZE 만큼의 힙 확장 실패시 1, 성공시 0 return
@@ -153,6 +159,7 @@ static void *coalesce(void *bp) // bp 에 위치한 블럭은 무조건 free 상
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0)); // 다음 블록 푸터
         bp = PREV_BLKP(bp);
     }
+    curr_listp = bp;
     return bp;
 }
 
@@ -171,15 +178,13 @@ void *mm_malloc(size_t size) // size 가 0 또는 음수일 시 NULL, 그 외에
         return NULL;
 
     /* Adjust block size to include overhead and alignment reqs. */
-    if (size <= DSIZE)
-        asize = 2 * DSIZE;
-    else
-        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE); // DSIZE 단위로 올림
+    asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE); // DSIZE 단위로 올림
 
     /* Search the free list for a fit */
-    if ((bp = first_fit(asize)) != NULL) // 빈공간 있을시 거기에 할당
+    if ((bp = next_fit(asize)) != NULL) // 빈공간 있을시 거기에 할당
     {
         place(bp, asize);
+        curr_listp = bp;
         return bp;
     }
 
@@ -188,6 +193,7 @@ void *mm_malloc(size_t size) // size 가 0 또는 음수일 시 NULL, 그 외에
     if ((bp = extend_heap(extendsize / WSIZE)) == NULL) // extend_heap 은 워드 단위를 input 으로 받음, 안될경우 return
         return NULL;
     place(bp, asize); // extend_heap 시 맨 뒤 빈 블럭의 bp 주소 return
+    curr_listp = bp;
     return bp;
 }
 
@@ -205,14 +211,61 @@ void *first_fit(size_t asize) // 빈 공간 있을시 bp, 없을시 NULL return
 
 void *next_fit(size_t asize) // 빈 공간 있을시 bp, 없을시 NULL return
 {
-    void *bp;
+    char *bp = curr_listp;
 
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
+    /* Search from curr_listp to the end of list */
+    for (; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
+    {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+            return bp;
+    }
+    /* search from start of list to curr_listp */
+    for (bp = heap_listp; bp < curr_listp; bp = NEXT_BLKP(bp))
     {
         if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
             return bp;
     }
     return NULL;
+}
+
+void *best_fit(size_t asize) // 빈 공간 있을시 bp, 없을시 NULL return
+{
+    void *bp;
+    void *temp = NULL;
+    size_t csize = (1 << 31);
+
+    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) // heap_listp 는 프롤로그 블록의 푸터(payload)를 가리키고 있음
+    {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+        {
+            if (csize > GET_SIZE(HDRP(bp)))
+            {
+                temp = bp;
+                csize = GET_SIZE(HDRP(bp));
+            }
+        }
+    }
+    return temp;
+}
+
+void *worst_fit(size_t asize) // 빈 공간 있을시 bp, 없을시 NULL return
+{
+    void *bp;
+    void *temp = NULL;
+    size_t csize = 0;
+
+    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) // heap_listp 는 프롤로그 블록의 푸터(payload)를 가리키고 있음
+    {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+        {
+            if (csize < GET_SIZE(HDRP(bp)))
+            {
+                temp = bp;
+                csize = GET_SIZE(HDRP(bp));
+            }
+        }
+    }
+    return temp;
 }
 
 static void place(void *bp, size_t asize)
