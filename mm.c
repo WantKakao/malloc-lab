@@ -37,7 +37,7 @@ team_t team = {
 /* Vasic constants and macros */
 #define WSIZE 4             // 워드 사이즈
 #define DSIZE 8             // 더블워드 사이즈
-#define CHUNKSIZE (1 << 12) // 최소 확장 사이즈
+#define CHUNKSIZE (1 << 10) // 최소 확장 사이즈
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
@@ -178,7 +178,7 @@ void *mm_malloc(size_t size) // size 가 0 또는 음수일 시 NULL, 그 외에
         return NULL;
 
     /* Adjust block size to include overhead and alignment reqs. */
-    asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE); // DSIZE 단위로 올림
+    asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE); // 헤더 푸터 추가 후 DSIZE 단위로 올림
 
     /* Search the free list for a fit */
     if ((bp = next_fit(asize)) != NULL) // 빈공간 있을시 거기에 할당
@@ -190,7 +190,7 @@ void *mm_malloc(size_t size) // size 가 0 또는 음수일 시 NULL, 그 외에
 
     /* No fit found. Get more memory and place the block */
     extendsize = MAX(asize, CHUNKSIZE);                 // 힙 확장 최소단위 = CHUNKSIZE
-    if ((bp = extend_heap(extendsize / WSIZE)) == NULL) // extend_heap 은 워드 단위를 input 으로 받음, 안될경우 return
+    if ((bp = extend_heap(extendsize / WSIZE)) == NULL) // extend_heap 안될경우 return
         return NULL;
     place(bp, asize); // extend_heap 시 맨 뒤 빈 블럭의 bp 주소 return
     curr_listp = bp;
@@ -209,6 +209,7 @@ void *first_fit(size_t asize) // 빈 공간 있을시 bp, 없을시 NULL return
     return NULL;
 }
 
+/* next_fit 의 포인터는 free 시에 움직여줘야하나? */
 void *next_fit(size_t asize) // 빈 공간 있을시 bp, 없을시 NULL return
 {
     char *bp = curr_listp;
@@ -310,55 +311,32 @@ void *mm_realloc(void *bp, size_t size)
     size_t old_size = GET_SIZE(HDRP(bp));
     size_t new_size = size + (2 * WSIZE); // 2*WISE는 헤더와 풋터
 
-    // new_size가 old_size보다 작거나 같으면 기존 bp 그대로 사용
+    // if (size <= 0)
+    // {
+    //     mm_free(bp);
+    //     return 0;
+    // }
+
+    // new_size가 old_size보다 작거나 같으면 기존 블럭 그대로 사용
     if (new_size <= old_size)
+        return bp;
+
+    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+    size_t current_size = old_size + GET_SIZE(HDRP(NEXT_BLKP(bp)));
+
+    // next block이 가용상태이고 old, next block의 사이즈 합이 new_size보다 크면 그냥 쓰기
+    if (!next_alloc && current_size >= new_size)
     {
+        PUT(HDRP(bp), PACK(current_size, 1));
+        PUT(FTRP(bp), PACK(current_size, 1));
         return bp;
     }
-    // new_size가 old_size보다 크면 사이즈 변경
+    // prev block ??
     else
     {
-        size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-        size_t current_size = old_size + GET_SIZE(HDRP(NEXT_BLKP(bp)));
-
-        // next block이 가용상태이고 old, next block의 사이즈 합이 new_size보다 크면 그냥 그거 바로 합쳐서 쓰기
-        if (!next_alloc && current_size >= new_size)
-        {
-            PUT(HDRP(bp), PACK(current_size, 1));
-            PUT(FTRP(bp), PACK(current_size, 1));
-            return bp;
-        }
-        // 아니면 새로 block 만들어서 거기로 옮기기
-        else
-        {
-            void *new_bp = mm_malloc(new_size);
-            memcpy(new_bp, bp, new_size); // 메모리의 특정한 부분으로부터 얼마까지의 부분을 다른 메모리 영역으로 복사해주는 함수(old_bp로부터 new_size만큼의 문자를 new_bp로 복사해라!)
-            mm_free(bp);
-            return new_bp;
-        }
+        void *new_bp = mm_malloc(new_size); // 왜 new_size ?
+        memcpy(new_bp, bp, new_size);
+        mm_free(bp);
+        return new_bp;
     }
 }
-
-
-/*
- * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
- */
-/*
-void *mm_realloc(void *ptr, size_t size)
-{
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
-
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
-        return NULL;
-    copySize = GET_SIZE(HDRP(oldptr));
-    // copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-        copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    return newptr;
-}
-*/
